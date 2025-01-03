@@ -1,0 +1,8 @@
+# CODEOWNERS
+
+# Default owners for everything
+* @talkitdoit-org/approvers
+
+# Specific owners for protected infrastructure
+*.tf  @talkitdoit-org/infrastructure-approvers
+/policy/*.rego  @talkitdoit-org/policy-approvers

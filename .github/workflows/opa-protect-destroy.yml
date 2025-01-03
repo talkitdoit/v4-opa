@@ -1,0 +1,152 @@
+name: OPA Protect Destroy
+
+on:
+  pull_request:
+    paths:
+      - '**/*.tf'
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.tf'
+  workflow_dispatch:
+
+jobs:
+  terraform-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set Azure Subscription
+        run: |
+          az account set --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        
+      - name: Setup OPA
+        uses: open-policy-agent/setup-opa@v1
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+            terraform_version: 1.8.0
+            
+      - name: Setup Terraform Environment Variables
+        run: |
+          echo "ARM_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" >> $GITHUB_ENV
+          echo "ARM_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}" >> $GITHUB_ENV
+          echo "ARM_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> $GITHUB_ENV
+          echo "ARM_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
+
+        # init the terraform backend
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${TF_STATE_RG}" \
+            -backend-config="storage_account_name=${TF_STATE_STORAGE}" \
+            -backend-config="container_name=${TF_STATE_CONTAINER}" \
+            -backend-config="key=${TF_STATE_KEY}"
+        env:
+          TF_STATE_RG: "rg-talkitdoit-terraform-state"
+          TF_STATE_STORAGE: "sttalkitdoitterraform"
+          TF_STATE_CONTAINER: "tfstate"
+          TF_STATE_KEY: "terraform.tfstate"
+
+      # plan the terraform changes
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -detailed-exitcode -out=tfplan.binary
+        continue-on-error: true
+        env:
+          TF_LOG: TRACE
+
+      - name: Format OPA Policy
+        run: |
+          opa fmt -w policy/terraform.rego
+
+      - name: Get PR Number
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "PR_NUMBER=${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+
+      - name: Process Plan and Run OPA
+        id: opa-check
+        if: github.event_name == 'pull_request' && (steps.plan.outcome == 'success' || steps.plan.outcome == 'failure' && steps.plan.outputs.exitcode == '2')
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          echo "Converting plan to JSON..."
+          terraform show -json tfplan.binary > tfplan.json
+          
+          echo "Checking all resource changes..."
+          jq '.resource_changes[] | {address: .address, actions: .change.actions, tags: .change.before.tags}' tfplan.json
+          
+          echo "Checking specifically for delete operations..."
+          jq '.resource_changes[] | select(.change.actions[] | contains("delete"))' tfplan.json
+
+          echo "Running OPA evaluation..."
+          echo "Checking requires_approval rule..."
+          REQUIRES_APPROVAL=$(opa eval --format json --data policy/terraform.rego --input tfplan.json "data.terraform.analysis.requires_approval")
+          
+          echo "Checking deny rule..."
+          DENY=$(opa eval --format json --data policy/terraform.rego --input tfplan.json "data.terraform.analysis.deny")
+          
+          echo "OPA evaluation results:"
+          echo "requires_approval: $REQUIRES_APPROVAL"
+          echo "deny: $DENY"
+          
+          if [ "$(echo $REQUIRES_APPROVAL | jq -r '.result[0].expressions[0].value | length')" -gt 0 ]; then
+            echo "Protected resources found, getting details..."
+            DETAILS=$(opa eval --format json --data policy/terraform.rego --input tfplan.json "data.terraform.analysis.destroy_details")
+            
+            # Extract resource type for message
+            RESOURCE_TYPE=$(echo "$DETAILS" | jq -r '.result[0].expressions[0].value[0].resource_type')
+            
+            # Send Slack notification with PR link
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{
+                \"blocks\": [
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"🚨 *Protected Resource Change Detected*\n*Resource Type:* ${RESOURCE_TYPE}\n*Action:* Recreate\"
+                    }
+                  },
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"👉 Please review and approve the changes in the PR: <${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${PR_NUMBER}|View Pull Request>\"
+                    }
+                  }
+                ]
+              }" "$SLACK_WEBHOOK_URL"
+            
+            echo "::warning ::Protected resources require approval. Please review the PR."
+            exit 0
+          else
+            echo "::notice::✅ No protected resources affected. Changes can proceed normally."
+            
+            # Optional: Send informational Slack message
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{
+                \"blocks\": [
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"ℹ️ *Infrastructure Change Notification*\n💡 Changes detected but no protected resources affected.\n👉 PR: <${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${PR_NUMBER}|View Pull Request>\"
+                    }
+                  }
+                ]
+              }" "$SLACK_WEBHOOK_URL"
+          fi
+
+      - name: Terraform Apply
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: terraform apply -auto-approve -input=false tfplan.binary
