@@ -221,6 +221,55 @@ Slack can be installed from their official website for all platforms:
    --data '{"text":"Hello, World!"}' \
    YOUR_WEBHOOK_URL
 
+5. **Store Webhook in GitHub Actions Secrets**:
+   See the "GitHub Actions Secrets Setup" section below for instructions on storing your webhook URL securely.
+
+### GitHub Actions Secrets Setup
+
+To securely store sensitive information like the Slack webhook URL and Azure credentials, you'll need to set up GitHub Actions secrets:
+
+1. **Access Repository Secrets**:
+   ```
+   1. Go to your GitHub repository
+   2. Click on "Settings" tab
+   3. Select "Secrets and variables" from the left sidebar
+   4. Click on "Actions" under secrets and variables
+   5. Click "New repository secret"
+   ```
+
+2. **Add Required Secrets**:
+   - For Slack Webhook:
+     ```
+     1. Name: SLACK_WEBHOOK_URL
+     2. Value: Your webhook URL from the Slack app setup
+     3. Click "Add secret"
+     ```
+   - For Azure Credentials:
+     ```
+     1. Name: AZURE_CREDENTIALS
+     2. Value: Service principal JSON
+     3. Click "Add secret"
+     ```
+     ```
+     1. Name: AZURE_SUBSCRIPTION_ID
+     2. Value: Your Azure subscription ID
+     3. Click "Add secret"
+     ```
+
+3. **Verify Secrets**:
+   - Secrets should appear in your list with masked values
+   - You cannot view secret values after creation
+   - To update a secret, you'll need to create a new value
+
+4. **Using Secrets in Workflows**:
+   Secrets are accessed in your GitHub Actions workflows using this syntax:
+   ```yaml
+   steps:
+     - name: Send Slack Notification
+       env:
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+   ```
+
 ### GPG Keys Installation
 
 #### macOS
